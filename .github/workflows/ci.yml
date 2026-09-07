@@ -36,10 +36,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install nightly + cargo-fuzz
+      # Root rust-toolchain.toml pins 1.91; cargo-fuzz needs nightly (-Zsanitizer).
+      - name: Install nightly
         uses: dtolnay/rust-toolchain@nightly
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo +nightly install cargo-fuzz --locked
       - name: Short fuzz decode
-        run: cargo fuzz run decode --fuzz-dir fuzz -- -max_total_time=30
-
+        env:
+          # Override the repo pin for this job only.
+          RUSTUP_TOOLCHAIN: nightly
+        run: cargo +nightly fuzz run decode --fuzz-dir fuzz -- -max_total_time=30
