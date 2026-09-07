@@ -17,3 +17,6 @@ path = "fuzz_targets/decode.rs"
 test = false
 doc = false
 bench = false
+
+# Detach from the parent workspace (cargo-fuzz).
+[workspace]

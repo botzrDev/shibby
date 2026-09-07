@@ -7,6 +7,7 @@ members = [
     "crates/uat-mcp",
     "crates/uat-cli",
 ]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.2.0"
