@@ -16,7 +16,7 @@ pub enum FailureCode {
 ///
 /// Carried in the QUIC `CONNECTION_CLOSE` application error code.
 /// Never sent as a UAT message.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[repr(u32)]
 pub enum CloseCode {
     Normal = 0,
