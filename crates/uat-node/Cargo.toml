@@ -6,10 +6,21 @@ license.workspace = true
 rust-version.workspace = true
 description = "UAT node: iroh endpoint, call driver, timers, audit, local socket"
 
+[[bin]]
+name = "uat-node"
+path = "src/main.rs"
+
 [dependencies]
+anyhow = { workspace = true }
 iroh = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
 uat-core = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
