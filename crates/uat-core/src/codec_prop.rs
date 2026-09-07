@@ -1,6 +1,5 @@
 //! F3 property tests: roundtrip through the **frame** codec, not serde alone.
 
-#![cfg(test)]
 
 use crate::codec::{decode, encode, AllowAll, MAX_FRAME, MAX_HDR_LEN};
 use crate::codes::FailureCode;
