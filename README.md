@@ -29,9 +29,9 @@ Pinned MSRV: see `rust-toolchain.toml` and `workspace.package.rust-version`.
 
 ## CI
 
-The intended GitHub Actions workflow is in [`docs/ci.yml.example`](docs/ci.yml.example).
-Copy it to `.github/workflows/ci.yml` once the GitHub token has the `workflow` scope
-(or add it via the GitHub UI). Until then, run locally:
+GitHub Actions: [`.github/workflows/ci.yml`](.github/workflows/ci.yml) (also mirrored at `docs/ci.yml.example`).
+
+Locally:
 
 ```bash
 cargo build --workspace --all-targets
