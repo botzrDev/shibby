@@ -28,3 +28,6 @@ pub use types::{
 
 #[cfg(test)]
 mod codec_prop;
+
+/// Protocol version is carried only in ALPN. No envelope version field.
+pub const ALPN: &[u8] = b"/uat/0.2";
