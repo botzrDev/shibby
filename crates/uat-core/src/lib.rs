@@ -25,3 +25,6 @@ pub use types::{
     ContentType, Credential, Deadline, TaskId, MAX_CONTENT_TYPE_LEN, MAX_CREDENTIAL_DECODED_LEN,
     MAX_DEADLINE_MS,
 };
+
+#[cfg(test)]
+mod codec_prop;
