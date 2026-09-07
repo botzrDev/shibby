@@ -7,6 +7,12 @@ rust-version.workspace = true
 description = "UAT types, codec, and state machines (no I/O)"
 
 [dependencies]
+base64 = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = "1.0"
 
 [lints]
 workspace = true
