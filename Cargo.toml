@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/uat-core",
+    "crates/uat-policy",
+    "crates/uat-node",
+    "crates/uat-mcp",
+    "crates/uat-cli",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.91"
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+iroh = "1.1.0"
+thiserror = "2.0.20"
+uat-core = { path = "crates/uat-core" }
+uat-policy = { path = "crates/uat-policy" }
+uat-node = { path = "crates/uat-node" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

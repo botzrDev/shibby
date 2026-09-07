@@ -1,0 +1,12 @@
+[package]
+name = "uat-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "UAT types, codec, and state machines (no I/O)"
+
+[dependencies]
+
+[lints]
+workspace = true
