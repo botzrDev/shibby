@@ -1,0 +1,17 @@
+[package]
+name = "uat-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "UAT MCP stdio server (rmcp); client of the local node socket"
+
+[[bin]]
+name = "uat-mcp"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+
+[lints]
+workspace = true

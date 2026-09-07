@@ -1,0 +1,14 @@
+[package]
+name = "uat-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "UAT answering policy, Biscuit verification, spent set, rate limits"
+
+[dependencies]
+thiserror = { workspace = true }
+uat-core = { workspace = true }
+
+[lints]
+workspace = true

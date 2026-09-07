@@ -1,0 +1,15 @@
+[package]
+name = "uat-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "UAT node: iroh endpoint, call driver, timers, audit, local socket"
+
+[dependencies]
+iroh = { workspace = true }
+thiserror = { workspace = true }
+uat-core = { workspace = true }
+
+[lints]
+workspace = true
