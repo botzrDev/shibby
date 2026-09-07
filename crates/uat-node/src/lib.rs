@@ -1,15 +1,23 @@
 //! Imperative shell around iroh. The only crate that may depend on iroh.
 
+mod auth;
+mod call;
+mod frame_io;
 mod identity;
+mod node;
 
 use iroh::PublicKey;
 use thiserror::Error;
 use uat_core::NodeId;
 
+pub use auth::{Allowlist, PeerSubmitAuth, Verify};
+pub use call::{close_with, run_callee, run_caller, watch_second_stream, CallError};
+pub use frame_io::{read_message, write_message, FrameIoError};
 pub use identity::{
     identity_path, load_or_create, load_or_create_at, uat_home, Identity, IdentityError,
     DEFAULT_UAT_DIR, IDENTITY_FILE, REQUIRED_MODE,
 };
+pub use node::{DaemonError, Node};
 
 /// Errors at the iroh identity edge.
 #[derive(Debug, Error)]

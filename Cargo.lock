@@ -3479,8 +3479,12 @@ dependencies = [
 name = "uat-node"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
  "iroh",
  "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
  "uat-core",
 ]
 
