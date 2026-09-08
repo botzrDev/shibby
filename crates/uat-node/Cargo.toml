@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 iroh = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -20,7 +22,7 @@ tracing = { workspace = true }
 uat-core = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "process"] }
 
 [lints]
 workspace = true
