@@ -1,4 +1,4 @@
-//! HLX-107: `uat` binary drives a full call through node.sock.
+//! HLX-107/108: `uat` binary drives a full call through node.sock.
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -12,7 +12,7 @@ fn temp_uat_home(label: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("time")
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("uat-hlx107-cli-{label}-{nanos}"));
+    let dir = std::env::temp_dir().join(format!("uat-hlx108-cli-{label}-{nanos}"));
     std::fs::create_dir_all(&dir).expect("mkdir");
     dir
 }
@@ -56,13 +56,22 @@ async fn uat_cli_dials_through_socket_and_errors_without_daemon() {
         .env("UAT_HOME", &caller_home)
         .arg("dial")
         .arg(&peer_id)
+        .arg("--deadline")
+        .arg("30000")
+        .arg("--content-type")
+        .arg("application/octet-stream")
         .arg("--addr")
         .arg(&addr)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
-        .await
+        .spawn()
         .expect("spawn uat");
+
+    // Empty body via closed stdin.
+    let mut child = output;
+    drop(child.stdin.take());
+    let output = child.wait_with_output().await.expect("wait uat");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -71,9 +80,10 @@ async fn uat_cli_dials_through_socket_and_errors_without_daemon() {
         "uat dial failed status={} stdout={stdout} stderr={stderr}",
         output.status
     );
-    assert!(
-        stdout.contains("outcome=Completed"),
-        "missing Completed in stdout={stdout}"
+    assert_eq!(
+        stdout.trim(),
+        "outcome=Completed",
+        "unexpected dial stdout={stdout}"
     );
 
     let lonely = temp_uat_home("lonely");
@@ -81,8 +91,13 @@ async fn uat_cli_dials_through_socket_and_errors_without_daemon() {
         .env("UAT_HOME", &lonely)
         .arg("dial")
         .arg(&peer_id)
+        .arg("--deadline")
+        .arg("1000")
+        .arg("--content-type")
+        .arg("text/plain")
         .arg("--addr")
         .arg(&addr)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -104,4 +119,48 @@ async fn uat_cli_dials_through_socket_and_errors_without_daemon() {
     let _ = std::fs::remove_dir_all(&callee_home);
     let _ = std::fs::remove_dir_all(&caller_home);
     let _ = std::fs::remove_dir_all(&lonely);
+}
+
+#[tokio::test]
+async fn uat_identity_prints_one_line_pubkey() {
+    let home = temp_uat_home("identity");
+    let uat_bin = env!("CARGO_BIN_EXE_uat");
+    let output = tokio::process::Command::new(uat_bin)
+        .env("UAT_HOME", &home)
+        .arg("identity")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .expect("spawn identity");
+    assert!(
+        output.status.success(),
+        "identity failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.trim_end_matches('\n');
+    assert!(
+        !line.is_empty() && !line.contains('\n'),
+        "identity must be one non-empty line, got {stdout:?}"
+    );
+    // Hex public key (64 chars) from iroh Display.
+    assert_eq!(line.len(), 64, "expected 64-char hex pubkey, got {line}");
+    assert!(
+        line.chars().all(|c| c.is_ascii_hexdigit()),
+        "pubkey not hex: {line}"
+    );
+
+    let again = tokio::process::Command::new(uat_bin)
+        .env("UAT_HOME", &home)
+        .arg("identity")
+        .output()
+        .await
+        .expect("identity again");
+    assert_eq!(
+        String::from_utf8_lossy(&again.stdout).trim(),
+        line,
+        "identity must be stable across restarts"
+    );
+    let _ = std::fs::remove_dir_all(&home);
 }
