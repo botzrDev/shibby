@@ -3455,6 +3455,10 @@ name = "uat-cli"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "tokio",
+ "tokio-util",
+ "uat-core",
+ "uat-node",
 ]
 
 [[package]]
@@ -3481,6 +3485,8 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "iroh",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",

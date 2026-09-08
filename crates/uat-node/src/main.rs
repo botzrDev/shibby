@@ -40,13 +40,15 @@ async fn main() -> Result<()> {
 fn print_usage() {
     eprintln!(
         "\
-uat-node (HLX-104 minimal)
+uat-node (HLX-104/107)
 
   uat-node listen [--allow <endpoint-id>]...
   uat-node dial <endpoint-id> --addr <ip:port> [--addr <ip:port>]...
 
+Listen also binds $UAT_HOME/node.sock (mode 0600) for uat-cli / local clients.
+
 Environment:
-  UAT_HOME   identity directory (default ~/.uat)
+  UAT_HOME   identity + node.sock directory (default ~/.uat)
 "
     );
 }
@@ -74,10 +76,14 @@ async fn cmd_listen(args: Vec<String>) -> Result<()> {
     let cancel = CancellationToken::new();
     let node = Node::bind_at(&home, Arc::new(allow) as Arc<dyn Verify>, cancel.clone()).await?;
     node.spawn_accept_loop();
+    node.spawn_local_socket(&home).await?;
 
     println!("node_id={}", node.endpoint().id());
     for addr in node.addr().ip_addrs() {
         println!("addr={addr}");
+    }
+    if let Some(sock) = node.local_sock_path().await {
+        println!("sock={}", sock.display());
     }
     println!("listening (SIGTERM to stop)");
 

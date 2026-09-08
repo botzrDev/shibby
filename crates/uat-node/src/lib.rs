@@ -4,6 +4,7 @@ mod auth;
 mod call;
 mod frame_io;
 mod identity;
+mod local;
 mod node;
 mod record;
 mod timing;
@@ -29,6 +30,10 @@ pub use frame_io::{read_message, write_message, FrameIoError};
 pub use identity::{
     identity_path, load_or_create, load_or_create_at, uat_home, Identity, IdentityError,
     DEFAULT_UAT_DIR, IDENTITY_FILE, REQUIRED_MODE,
+};
+pub use local::{
+    connect as connect_local, dial_via_sock, inbox_via_sock, sock_path, InboxEvent, LocalBindError,
+    LocalClientError, LocalCodecError, LocalRequest, LocalResponse, SOCK_FILE, SOCK_MODE,
 };
 pub use node::{DaemonError, Node};
 

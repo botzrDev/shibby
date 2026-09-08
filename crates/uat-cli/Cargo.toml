@@ -12,6 +12,13 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
+tokio = { workspace = true }
+uat-core = { workspace = true }
+uat-node = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "process"] }
+tokio-util = { workspace = true }
 
 [lints]
 workspace = true

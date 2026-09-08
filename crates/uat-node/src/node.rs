@@ -1,12 +1,13 @@
 //! Iroh endpoint owner: accept loop, dial, CancellationToken shutdown.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use iroh::endpoint::presets;
 use iroh::{Endpoint, EndpointAddr, RelayMode};
 use thiserror::Error;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, info, warn};
@@ -15,6 +16,9 @@ use uat_core::{CloseCode, Message, NodeId, Outcome};
 use crate::auth::Verify;
 use crate::call::{close_with, run_callee_with, run_caller, CallError, CalleeBehavior};
 use crate::identity::{load_or_create_at, Identity, IdentityError, IDENTITY_FILE};
+use crate::local::{
+    bind_sock, remove_sock_file, spawn_local_accept_loop, InboxEvent, LocalBindError, SOCK_FILE,
+};
 use crate::record::{
     connection_bytes, AuthOutcome, CallRecord, CallRecordSink, Direction, Path as ConnPath,
     TracingCallRecordSink, CALL_RECORD_SCHEMA_VERSION,
@@ -44,6 +48,10 @@ pub enum DaemonError {
     /// In-call failure.
     #[error(transparent)]
     Call(#[from] CallError),
+
+    /// Local `$UAT_HOME/node.sock` bind failed.
+    #[error(transparent)]
+    LocalSock(#[from] LocalBindError),
 }
 
 /// Owns an iroh [`Endpoint`], accept loop, and one Call task per connection.
@@ -55,6 +63,11 @@ pub struct Node {
     tracker: TaskTracker,
     callee_behavior: CalleeBehavior,
     records: Arc<dyn CallRecordSink>,
+    /// Notifies local-socket Inbox polls of finished inbound calls (M1 one-shot).
+    inbox_tx: mpsc::Sender<InboxEvent>,
+    inbox_rx: tokio::sync::Mutex<Option<mpsc::Receiver<InboxEvent>>>,
+    /// Directory that owns `node.sock` when the local listener is active.
+    sock_home: tokio::sync::Mutex<Option<PathBuf>>,
 }
 
 impl Node {
@@ -105,6 +118,7 @@ impl Node {
             .await
             .map_err(|e| DaemonError::Bind(e.to_string()))?;
 
+        let (inbox_tx, inbox_rx) = mpsc::channel(32);
         let node = Arc::new(Self {
             endpoint,
             identity,
@@ -113,6 +127,9 @@ impl Node {
             tracker: TaskTracker::new(),
             callee_behavior,
             records,
+            inbox_tx,
+            inbox_rx: tokio::sync::Mutex::new(Some(inbox_rx)),
+            sock_home: tokio::sync::Mutex::new(None),
         });
         Ok(node)
     }
@@ -188,6 +205,48 @@ impl Node {
         });
     }
 
+    /// Bind `$UAT_HOME/node.sock` (mode 0600) and accept local Dial/Inbox/Message clients.
+    ///
+    /// Call once after [`Self::bind`]. Replaces a stale sock file; refuses if another
+    /// daemon already accepts on the path.
+    pub async fn spawn_local_socket(self: &Arc<Self>, uat_home: &Path) -> Result<(), DaemonError> {
+        let listener = bind_sock(uat_home).await?;
+        let mut home_guard = self.sock_home.lock().await;
+        *home_guard = Some(uat_home.to_path_buf());
+        drop(home_guard);
+
+        let mut rx_guard = self.inbox_rx.lock().await;
+        let inbox_rx = rx_guard
+            .take()
+            .ok_or_else(|| DaemonError::Bind("local socket inbox already taken".into()))?;
+        drop(rx_guard);
+
+        let latest_inbox = Arc::new(tokio::sync::Mutex::new(None));
+        spawn_local_accept_loop(
+            Arc::clone(self),
+            listener,
+            uat_home.to_path_buf(),
+            inbox_rx,
+            latest_inbox,
+        );
+        Ok(())
+    }
+
+    /// Path of the local socket when listening, if known.
+    pub async fn local_sock_path(&self) -> Option<PathBuf> {
+        self.sock_home
+            .lock()
+            .await
+            .as_ref()
+            .map(|home| home.join(SOCK_FILE))
+    }
+
+    /// Task tracker for spawning daemon-owned work (local socket accept loop).
+    #[must_use]
+    pub fn tracker(&self) -> &TaskTracker {
+        &self.tracker
+    }
+
     async fn accept_loop(self: Arc<Self>) {
         info!(node = ?self.node_id(), "accept loop started");
         loop {
@@ -260,6 +319,10 @@ impl Node {
         {
             Ok(outcome) => {
                 info!(?peer, ?outcome, "callee call finished");
+                let _ = self.inbox_tx.try_send(InboxEvent {
+                    peer: format!("{peer:?}"),
+                    outcome,
+                });
                 Ok(())
             }
             Err(CallError::Cancelled) => Ok(()),
@@ -292,6 +355,9 @@ impl Node {
         self.cancel.cancel();
         self.tracker.close();
         self.tracker.wait().await;
+        if let Some(home) = self.sock_home.lock().await.take() {
+            remove_sock_file(&home);
+        }
         self.endpoint.close().await;
         info!("node shut down complete");
     }
