@@ -9,13 +9,13 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::{debug, info, warn};
-use uat_core::{Message, NodeId, Outcome};
+use uat_core::{CloseCode, Message, NodeId, Outcome};
 
 use crate::auth::Verify;
-use crate::call::{close_with, run_callee, run_caller, CallError};
+use crate::call::{close_with, run_callee_with, run_caller, CallError, CalleeBehavior};
 use crate::identity::{load_or_create_at, Identity, IdentityError, IDENTITY_FILE};
+use crate::timing::uat_transport_config;
 use crate::{public_key_to_node_id, NodeError};
-use uat_core::CloseCode;
 
 /// Errors constructing or running a [`Node`].
 #[derive(Debug, Error)]
@@ -48,6 +48,7 @@ pub struct Node {
     verify: Arc<dyn Verify>,
     cancel: CancellationToken,
     tracker: TaskTracker,
+    callee_behavior: CalleeBehavior,
 }
 
 impl Node {
@@ -60,11 +61,22 @@ impl Node {
         verify: Arc<dyn Verify>,
         cancel: CancellationToken,
     ) -> Result<Arc<Self>, DaemonError> {
+        Self::bind_with_behavior(identity, verify, cancel, CalleeBehavior::StubComplete).await
+    }
+
+    /// Bind with an explicit callee stub behavior (timer / liveness tests).
+    pub async fn bind_with_behavior(
+        identity: Identity,
+        verify: Arc<dyn Verify>,
+        cancel: CancellationToken,
+        callee_behavior: CalleeBehavior,
+    ) -> Result<Arc<Self>, DaemonError> {
         let secret = identity.secret_key().clone();
         let endpoint = Endpoint::builder(presets::N0)
             .secret_key(secret)
             .alpns(vec![uat_core::ALPN.to_vec()])
             .relay_mode(RelayMode::Disabled)
+            .transport_config(uat_transport_config())
             .bind()
             .await
             .map_err(|e| DaemonError::Bind(e.to_string()))?;
@@ -75,6 +87,7 @@ impl Node {
             verify,
             cancel,
             tracker: TaskTracker::new(),
+            callee_behavior,
         });
         Ok(node)
     }
@@ -87,6 +100,17 @@ impl Node {
     ) -> Result<Arc<Self>, DaemonError> {
         let identity = load_or_create_at(&uat_home.join(IDENTITY_FILE))?;
         Self::bind(identity, verify, cancel).await
+    }
+
+    /// [`Self::bind_at`] with explicit callee stub behavior.
+    pub async fn bind_at_with_behavior(
+        uat_home: &Path,
+        verify: Arc<dyn Verify>,
+        cancel: CancellationToken,
+        callee_behavior: CalleeBehavior,
+    ) -> Result<Arc<Self>, DaemonError> {
+        let identity = load_or_create_at(&uat_home.join(IDENTITY_FILE))?;
+        Self::bind_with_behavior(identity, verify, cancel, callee_behavior).await
     }
 
     /// This node's stable [`NodeId`].
@@ -162,7 +186,15 @@ impl Node {
         }
 
         let cancel = self.cancel.child_token();
-        match run_callee(conn, peer, Arc::clone(&self.verify), cancel).await {
+        match run_callee_with(
+            conn,
+            peer,
+            Arc::clone(&self.verify),
+            cancel,
+            self.callee_behavior,
+        )
+        .await
+        {
             Ok(outcome) => {
                 info!(?peer, ?outcome, "callee call finished");
                 Ok(())

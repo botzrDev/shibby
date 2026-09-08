@@ -5,13 +5,20 @@ mod call;
 mod frame_io;
 mod identity;
 mod node;
+mod timing;
 
 use iroh::PublicKey;
 use thiserror::Error;
 use uat_core::NodeId;
 
 pub use auth::{Allowlist, PeerSubmitAuth, Verify};
-pub use call::{close_with, run_callee, run_caller, watch_second_stream, CallError};
+pub use call::{
+    close_with, drive_chan_call, run_callee, run_callee_with, run_caller, run_caller_with,
+    watch_second_stream, CallError, CalleeBehavior, CallerOpts, TimerEvent,
+};
+pub use timing::{
+    callee_budget, caller_budget, quic_idle_timeout, quic_keep_alive, uat_transport_config,
+};
 pub use frame_io::{read_message, write_message, FrameIoError};
 pub use identity::{
     identity_path, load_or_create, load_or_create_at, uat_home, Identity, IdentityError,
