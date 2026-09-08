@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 use iroh::endpoint::presets;
 use iroh::{Endpoint, EndpointAddr, RelayMode};
@@ -14,6 +15,10 @@ use uat_core::{CloseCode, Message, NodeId, Outcome};
 use crate::auth::Verify;
 use crate::call::{close_with, run_callee_with, run_caller, CallError, CalleeBehavior};
 use crate::identity::{load_or_create_at, Identity, IdentityError, IDENTITY_FILE};
+use crate::record::{
+    connection_bytes, AuthOutcome, CallRecord, CallRecordSink, Direction, Path as ConnPath,
+    TracingCallRecordSink, CALL_RECORD_SCHEMA_VERSION,
+};
 use crate::timing::uat_transport_config;
 use crate::{public_key_to_node_id, NodeError};
 
@@ -49,6 +54,7 @@ pub struct Node {
     cancel: CancellationToken,
     tracker: TaskTracker,
     callee_behavior: CalleeBehavior,
+    records: Arc<dyn CallRecordSink>,
 }
 
 impl Node {
@@ -71,6 +77,24 @@ impl Node {
         cancel: CancellationToken,
         callee_behavior: CalleeBehavior,
     ) -> Result<Arc<Self>, DaemonError> {
+        Self::bind_with_behavior_and_sink(
+            identity,
+            verify,
+            cancel,
+            callee_behavior,
+            Arc::new(TracingCallRecordSink),
+        )
+        .await
+    }
+
+    /// Bind with callee behavior and a [`CallRecordSink`] (tests use [`crate::MemoryCallRecordSink`]).
+    pub async fn bind_with_behavior_and_sink(
+        identity: Identity,
+        verify: Arc<dyn Verify>,
+        cancel: CancellationToken,
+        callee_behavior: CalleeBehavior,
+        records: Arc<dyn CallRecordSink>,
+    ) -> Result<Arc<Self>, DaemonError> {
         let secret = identity.secret_key().clone();
         let endpoint = Endpoint::builder(presets::N0)
             .secret_key(secret)
@@ -88,6 +112,7 @@ impl Node {
             cancel,
             tracker: TaskTracker::new(),
             callee_behavior,
+            records,
         });
         Ok(node)
     }
@@ -111,6 +136,24 @@ impl Node {
     ) -> Result<Arc<Self>, DaemonError> {
         let identity = load_or_create_at(&uat_home.join(IDENTITY_FILE))?;
         Self::bind_with_behavior(identity, verify, cancel, callee_behavior).await
+    }
+
+    /// [`Self::bind_at_with_behavior`] plus a custom [`CallRecordSink`].
+    pub async fn bind_at_with_behavior_and_sink(
+        uat_home: &Path,
+        verify: Arc<dyn Verify>,
+        cancel: CancellationToken,
+        callee_behavior: CalleeBehavior,
+        records: Arc<dyn CallRecordSink>,
+    ) -> Result<Arc<Self>, DaemonError> {
+        let identity = load_or_create_at(&uat_home.join(IDENTITY_FILE))?;
+        Self::bind_with_behavior_and_sink(identity, verify, cancel, callee_behavior, records).await
+    }
+
+    /// Shared call-record sink (tests).
+    #[must_use]
+    pub fn record_sink(&self) -> Arc<dyn CallRecordSink> {
+        Arc::clone(&self.records)
     }
 
     /// This node's stable [`NodeId`].
@@ -174,6 +217,8 @@ impl Node {
         self: Arc<Self>,
         incoming: iroh::endpoint::Incoming,
     ) -> Result<(), DaemonError> {
+        let started_at = std::time::SystemTime::now();
+        let start = Instant::now();
         let conn = incoming
             .await
             .map_err(|e| DaemonError::Connect(e.to_string()))?;
@@ -182,6 +227,23 @@ impl Node {
         if !self.verify.verify_peer(peer) {
             debug!(?peer, "rejecting dialer: not on allowlist");
             close_with(&conn, CloseCode::Normal);
+            let (bytes_sent, bytes_recv) = connection_bytes(&conn);
+            // Emit here (before Call task): deny must still produce a record, task=None.
+            self.records.emit(CallRecord {
+                schema_version: CALL_RECORD_SCHEMA_VERSION,
+                started_at,
+                task: None,
+                direction: Direction::Inbound,
+                peer,
+                authorization: AuthOutcome::Denied {
+                    reason: "not on allowlist".into(),
+                },
+                outcome: Outcome::Closed(CloseCode::Normal),
+                path: ConnPath::Direct,
+                bytes_sent,
+                bytes_recv,
+                wall_time_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            });
             return Ok(());
         }
 
@@ -192,6 +254,7 @@ impl Node {
             Arc::clone(&self.verify),
             cancel,
             self.callee_behavior,
+            Arc::clone(&self.records),
         )
         .await
         {
@@ -219,7 +282,7 @@ impl Node {
             .map_err(|e| DaemonError::Connect(e.to_string()))?;
 
         let cancel = self.cancel.child_token();
-        let outcome = run_caller(conn, submit, cancel).await?;
+        let outcome = run_caller(conn, submit, cancel, Arc::clone(&self.records)).await?;
         Ok(outcome)
     }
 
