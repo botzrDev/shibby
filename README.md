@@ -23,6 +23,8 @@ crates/
 cargo build
 cargo clippy --all-targets -- -D warnings
 cargo test
+# HLX-108 loopback call (after cargo build -p uat-cli -p uat-node):
+#   ./scripts/e2e-call.sh
 ```
 
 Pinned MSRV: see `rust-toolchain.toml` and `workspace.package.rust-version`.
