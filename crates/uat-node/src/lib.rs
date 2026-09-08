@@ -5,6 +5,7 @@ mod call;
 mod frame_io;
 mod identity;
 mod node;
+mod record;
 mod timing;
 
 use iroh::PublicKey;
@@ -15,6 +16,11 @@ pub use auth::{Allowlist, PeerSubmitAuth, Verify};
 pub use call::{
     close_with, drive_chan_call, run_callee, run_callee_with, run_caller, run_caller_with,
     watch_second_stream, CallError, CalleeBehavior, CallerOpts, TimerEvent,
+};
+pub use record::{
+    connection_bytes, outcome_from_call_error, AuthOutcome, AuthRule, CallRecord,
+    CallRecordGuard, CallRecordSink, Direction, MemoryCallRecordSink, Path as ConnPath,
+    TracingCallRecordSink, CALL_RECORD_SCHEMA_VERSION,
 };
 pub use timing::{
     callee_budget, caller_budget, quic_idle_timeout, quic_keep_alive, uat_transport_config,

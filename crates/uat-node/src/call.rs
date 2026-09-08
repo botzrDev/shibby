@@ -21,7 +21,11 @@ use uat_core::{
 
 use crate::auth::{PeerSubmitAuth, Verify};
 use crate::frame_io::{read_message, write_message, FrameIoError};
+use crate::record::{
+    AuthOutcome, AuthRule, CallRecordGuard, CallRecordSink, Direction,
+};
 use crate::timing::{callee_budget, caller_budget, quic_idle_timeout};
+use crate::public_key_to_node_id;
 
 /// Errors while driving a call.
 #[derive(Debug, Error)]
@@ -144,8 +148,9 @@ pub async fn run_caller(
     conn: Connection,
     submit: Message,
     cancel: CancellationToken,
+    sink: Arc<dyn CallRecordSink>,
 ) -> Result<Outcome, CallError> {
-    run_caller_with(conn, submit, cancel, CallerOpts::default()).await
+    run_caller_with(conn, submit, cancel, CallerOpts::default(), sink).await
 }
 
 /// Caller entry with optional hooks (Cancel injection for tests).
@@ -154,19 +159,41 @@ pub async fn run_caller_with(
     submit: Message,
     cancel: CancellationToken,
     mut opts: CallerOpts,
+    sink: Arc<dyn CallRecordSink>,
 ) -> Result<Outcome, CallError> {
+    let peer = public_key_to_node_id(&conn.remote_id());
+    let mut record = CallRecordGuard::new(
+        sink,
+        Direction::Outbound,
+        peer,
+        AuthOutcome::NotReached,
+        conn.clone(),
+    );
+    if let Message::Submit { task, .. } = &submit {
+        record.set_task(*task);
+    }
+
     if !matches!(submit, Message::Submit { .. }) {
+        record.set_outcome(Outcome::Closed(CloseCode::ProtocolViolation));
         return Err(CallError::Illegal);
     }
 
     let (mut send, mut recv) = match timeout(quic_idle_timeout(), conn.open_bi()).await {
         Ok(Ok(pair)) => pair,
-        Ok(Err(e)) => return Err(CallError::StreamSetup(e.to_string())),
-        Err(_) => return Err(CallError::StreamSetup("open_bi timed out".into())),
+        Ok(Err(e)) => {
+            let err = CallError::StreamSetup(e.to_string());
+            record.set_outcome(crate::record::outcome_from_call_error(&err));
+            return Err(err);
+        }
+        Err(_) => {
+            let err = CallError::StreamSetup("open_bi timed out".into());
+            record.set_outcome(crate::record::outcome_from_call_error(&err));
+            return Err(err);
+        }
     };
 
     let guard_cancel = cancel.child_token();
-    let guard = tokio::spawn(watch_second_stream(conn.clone(), guard_cancel.clone()));
+    let stream_guard = tokio::spawn(watch_second_stream(conn.clone(), guard_cancel.clone()));
 
     let result = caller_loop(
         &conn,
@@ -178,7 +205,8 @@ pub async fn run_caller_with(
     )
     .await;
     guard_cancel.cancel();
-    let _ = guard.await;
+    let _ = stream_guard.await;
+    record.observe_result(&result);
     result
 }
 
@@ -312,8 +340,9 @@ pub async fn run_callee(
     peer: NodeId,
     verify: Arc<dyn Verify>,
     cancel: CancellationToken,
+    sink: Arc<dyn CallRecordSink>,
 ) -> Result<Outcome, CallError> {
-    run_callee_with(conn, peer, verify, cancel, CalleeBehavior::StubComplete).await
+    run_callee_with(conn, peer, verify, cancel, CalleeBehavior::StubComplete, sink).await
 }
 
 /// Callee entry with selectable stub behavior.
@@ -323,28 +352,60 @@ pub async fn run_callee_with(
     verify: Arc<dyn Verify>,
     cancel: CancellationToken,
     behavior: CalleeBehavior,
+    sink: Arc<dyn CallRecordSink>,
 ) -> Result<Outcome, CallError> {
+    let mut record = CallRecordGuard::new(
+        sink,
+        Direction::Inbound,
+        peer,
+        AuthOutcome::Allowed(AuthRule::Allowlist),
+        conn.clone(),
+    );
+
     if !verify.verify_peer(peer) {
         close_with(&conn, CloseCode::Normal);
+        record.set_authorization(AuthOutcome::Denied {
+            reason: "not on allowlist".into(),
+        });
+        record.set_outcome(Outcome::Closed(CloseCode::Normal));
         return Err(CallError::Unauthorized);
     }
 
     let (mut send, mut recv) = match timeout(quic_idle_timeout(), conn.accept_bi()).await {
         Ok(Ok(pair)) => pair,
-        Ok(Err(e)) => return Err(CallError::StreamSetup(e.to_string())),
-        Err(_) => return Err(CallError::StreamSetup("accept_bi timed out".into())),
+        Ok(Err(e)) => {
+            let err = CallError::StreamSetup(e.to_string());
+            record.set_outcome(crate::record::outcome_from_call_error(&err));
+            return Err(err);
+        }
+        Err(_) => {
+            let err = CallError::StreamSetup("accept_bi timed out".into());
+            record.set_outcome(crate::record::outcome_from_call_error(&err));
+            return Err(err);
+        }
     };
 
     let guard_cancel = cancel.child_token();
-    let guard = tokio::spawn(watch_second_stream(conn.clone(), guard_cancel.clone()));
+    let stream_guard = tokio::spawn(watch_second_stream(conn.clone(), guard_cancel.clone()));
 
-    let result =
-        callee_loop(&conn, &mut send, &mut recv, peer, verify.as_ref(), &cancel, behavior).await;
+    let result = callee_loop(
+        &conn,
+        &mut send,
+        &mut recv,
+        peer,
+        verify.as_ref(),
+        &cancel,
+        behavior,
+        &mut record,
+    )
+    .await;
     guard_cancel.cancel();
-    let _ = guard.await;
+    let _ = stream_guard.await;
+    record.observe_result(&result);
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn callee_loop(
     conn: &Connection,
     send: &mut iroh::endpoint::SendStream,
@@ -353,6 +414,7 @@ async fn callee_loop(
     verify: &dyn Verify,
     cancel: &CancellationToken,
     behavior: CalleeBehavior,
+    record: &mut CallRecordGuard,
 ) -> Result<Outcome, CallError> {
     let auth = PeerSubmitAuth::new(peer, verify);
     let idle = quic_idle_timeout();
@@ -363,6 +425,7 @@ async fn callee_loop(
             return Err(CallError::Cancelled);
         }
         _ = conn.closed() => {
+            // Closed before Submit: task stays None.
             return Ok(Outcome::PeerLost);
         }
         msg = await_network(idle, read_message(recv, &auth)) => {
@@ -375,6 +438,9 @@ async fn callee_loop(
                     let _ = write_message(send, &failed).await;
                     let _ = send.finish();
                     close_with(conn, CloseCode::Normal);
+                    record.set_authorization(AuthOutcome::Denied {
+                        reason: "submit denied by allowlist".into(),
+                    });
                     return Err(CallError::Unauthorized);
                 }
                 Err(CallError::Frame(err)) => {
@@ -391,7 +457,10 @@ async fn callee_loop(
     };
 
     let deadline = match &submit {
-        Message::Submit { deadline, .. } => *deadline,
+        Message::Submit { task, deadline, .. } => {
+            record.set_task(*task);
+            *deadline
+        }
         _ => {
             close_with(conn, CloseCode::ProtocolViolation);
             return Err(CallError::Illegal);
