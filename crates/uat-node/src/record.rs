@@ -18,6 +18,8 @@ use uat_core::{CloseCode, NodeId, Outcome, TaskId};
 use crate::call::CallError;
 use crate::frame_io::FrameIoError;
 
+pub use uat_policy::AuthRule;
+
 /// Schema version written into every [`CallRecord`].
 pub const CALL_RECORD_SCHEMA_VERSION: u32 = 1;
 
@@ -29,14 +31,6 @@ pub enum Direction {
     Outbound,
     /// This node accepted.
     Inbound,
-}
-
-/// Which M1/M2 rule admitted the peer (seam for answering policy).
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthRule {
-    /// Peer passed the static [`crate::Allowlist`].
-    Allowlist,
 }
 
 /// Result of the authorization check for this connection.
@@ -80,7 +74,7 @@ pub struct CallRecord {
     /// Authenticated peer NodeId (never a claimed identity), hex-encoded.
     #[serde(serialize_with = "serialize_node_id_hex")]
     pub peer: NodeId,
-    /// Allowlist / policy decision for this connection.
+    /// Policy decision for this connection ([`AuthRule`] when allowed).
     pub authorization: AuthOutcome,
     /// How the call ended.
     pub outcome: Outcome,

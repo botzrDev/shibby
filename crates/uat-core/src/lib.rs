@@ -11,8 +11,8 @@ mod types;
 
 pub use codes::{CloseCode, FailureCode};
 pub use codec::{
-    decode, encode, inspect_submit, AllowAll, CodecError, DenyAll, FrameBuffer, InspectedSubmit,
-    SubmitAuthorizer, MAX_FRAME, MAX_HDR_LEN,
+    decode, encode, inspect_submit, split_frame, AllowAll, CodecError, DenyAll, FrameBuffer,
+    InspectedSubmit, SubmitAuthorizer, MAX_FRAME, MAX_HDR_LEN,
 };
 pub use error::TypeError;
 pub use message::Message;

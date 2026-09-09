@@ -15,12 +15,13 @@ use tokio::time::{timeout, Sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use uat_core::{
-    callee_step, caller_step, AllowAll, CalleeEvent, CalleeState, CallerEvent, CallerState,
-    CloseCode, FailureCode, Illegal, Message, NodeId, Outcome, GRACE_MS,
+    callee_step, caller_step, split_frame, AllowAll, CalleeEvent, CalleeState, CallerEvent,
+    CallerState, CloseCode, FailureCode, Illegal, Message, NodeId, Outcome, GRACE_MS,
 };
+use uat_policy::{AuthError, AuthorizedSubmit};
 
-use crate::auth::{PeerSubmitAuth, Verify};
-use crate::frame_io::{read_message, write_message, FrameIoError};
+use crate::auth::{authorize_submit_header, Verify};
+use crate::frame_io::{read_frame, read_message, write_message, FrameIoError};
 use crate::record::{
     AuthOutcome, AuthRule, CallRecordGuard, CallRecordSink, Direction,
 };
@@ -416,10 +417,12 @@ async fn callee_loop(
     behavior: CalleeBehavior,
     record: &mut CallRecordGuard,
 ) -> Result<Outcome, CallError> {
-    let auth = PeerSubmitAuth::new(peer, verify);
     let idle = quic_idle_timeout();
+    let policy = verify.policy();
+    let now = std::time::SystemTime::now();
 
-    let submit = tokio::select! {
+    // F4/S6: read frame → header-only UnverifiedSubmit → verify → only then copy body.
+    let frame = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
             return Err(CallError::Cancelled);
@@ -428,21 +431,9 @@ async fn callee_loop(
             // Closed before Submit: task stays None.
             return Ok(Outcome::PeerLost);
         }
-        msg = await_network(idle, read_message(recv, &auth)) => {
-            match msg {
-                Ok(m) => m,
-                Err(CallError::Frame(FrameIoError::Codec(uat_core::CodecError::SubmitDenied))) => {
-                    let failed = Message::Failed {
-                        code: FailureCode::Unauthorized,
-                    };
-                    let _ = write_message(send, &failed).await;
-                    let _ = send.finish();
-                    close_with(conn, CloseCode::Normal);
-                    record.set_authorization(AuthOutcome::Denied {
-                        reason: "submit denied by allowlist".into(),
-                    });
-                    return Err(CallError::Unauthorized);
-                }
+        frame = await_network(idle, read_frame(recv)) => {
+            match frame {
+                Ok(f) => f,
                 Err(CallError::Frame(err)) => {
                     close_on_frame_err(conn, &err);
                     return Err(CallError::Frame(err));
@@ -456,17 +447,54 @@ async fn callee_loop(
         }
     };
 
-    let deadline = match &submit {
-        Message::Submit { task, deadline, .. } => {
-            record.set_task(*task);
-            *deadline
-        }
-        _ => {
-            close_with(conn, CloseCode::ProtocolViolation);
-            return Err(CallError::Illegal);
+    let (header, body) = match split_frame(&frame) {
+        Ok(parts) => parts,
+        Err(err) => {
+            close_on_frame_err(conn, &FrameIoError::Codec(err.clone()));
+            return Err(CallError::Frame(FrameIoError::Codec(err)));
         }
     };
-    debug!(?peer, ?deadline, "callee received submit");
+
+    let authorized = match authorize_submit_header(header, policy, peer, now) {
+        Ok(a) => a,
+        Err(err) => {
+            let reason = match &err {
+                AuthError::Denied(_) => "submit denied by allowlist".to_string(),
+                AuthError::TokenNotImplemented => "biscuit token not implemented".to_string(),
+                other => other.to_string(),
+            };
+            let failed = Message::Failed {
+                code: FailureCode::Unauthorized,
+            };
+            let _ = write_message(send, &failed).await;
+            let _ = send.finish();
+            close_with(conn, CloseCode::Normal);
+            record.set_authorization(AuthOutcome::Denied { reason });
+            return Err(CallError::Unauthorized);
+        }
+    };
+
+    // Body materialization only after verify (S6). Handlers take AuthorizedSubmit only.
+    let authorized = authorized.with_body(body.to_vec());
+    record.set_authorization(AuthOutcome::Allowed(authorized.rule));
+    handle_authorized_submit(conn, send, recv, peer, cancel, behavior, record, authorized).await
+}
+
+/// Drive the call after a verified [`AuthorizedSubmit`] (body already attached).
+#[allow(clippy::too_many_arguments)]
+async fn handle_authorized_submit(
+    conn: &Connection,
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    peer: NodeId,
+    cancel: &CancellationToken,
+    behavior: CalleeBehavior,
+    record: &mut CallRecordGuard,
+    submit: AuthorizedSubmit,
+) -> Result<Outcome, CallError> {
+    let deadline = submit.deadline();
+    record.set_task(submit.task());
+    debug!(?peer, ?deadline, rule = ?submit.rule, "callee received authorized submit");
 
     // Callee timer starts at receipt of Submit.
     let mut call_timer = Box::pin(tokio::time::sleep(callee_budget(deadline)));

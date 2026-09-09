@@ -140,6 +140,13 @@ pub fn decode(buf: &[u8], auth: &impl SubmitAuthorizer) -> Result<Message, Codec
     finish_body(header_msg, body, auth)
 }
 
+/// Parse a frame into header + raw body slice without copying the body (F4).
+///
+/// Prefer this when authorization must run before materializing a `Submit` body.
+pub fn split_frame(buf: &[u8]) -> Result<(Message, &[u8]), CodecError> {
+    decode_parts(buf)
+}
+
 /// Parse length prefix and header without copying the body (F1 checked first).
 fn decode_parts(buf: &[u8]) -> Result<(Message, &[u8]), CodecError> {
     if buf.len() < 4 {

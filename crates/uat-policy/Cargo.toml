@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "UAT answering policy, Biscuit verification, spent set, rate limits"
 
 [dependencies]
+serde = { workspace = true }
 thiserror = { workspace = true }
 uat-core = { workspace = true }
 
