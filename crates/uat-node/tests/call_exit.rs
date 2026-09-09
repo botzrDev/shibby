@@ -69,11 +69,11 @@ async fn two_nodes_complete_call_and_shutdown_cleanly() {
     let (callee, caller, callee_home, caller_home) = bind_pair().await;
 
     let peer = callee.addr();
-    let outcome = caller
+    let finish = caller
         .dial(peer, sample_submit())
         .await
         .expect("dial+call");
-    assert_eq!(outcome, Outcome::Completed);
+    assert_eq!(finish.outcome, Outcome::Completed);
 
     caller.shutdown().await;
     callee.shutdown().await;
@@ -109,7 +109,11 @@ async fn empty_allowlist_rejects_caller() {
     let result = caller.dial(callee.addr(), sample_submit()).await;
     match result {
         Err(_) => {}
-        Ok(Outcome::PeerLost) | Ok(Outcome::Closed(_)) => {}
+        Ok(finish)
+            if matches!(
+                finish.outcome,
+                Outcome::PeerLost | Outcome::Closed(_)
+            ) => {}
         Ok(other) => panic!("expected reject/loss, got {other:?}"),
     }
 

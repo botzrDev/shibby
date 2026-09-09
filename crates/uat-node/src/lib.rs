@@ -19,9 +19,10 @@ pub use call::{
     watch_second_stream, CallError, CalleeBehavior, CallerOpts, TimerEvent,
 };
 pub use record::{
-    connection_bytes, outcome_from_call_error, AuthOutcome, AuthRule, CallRecord,
-    CallRecordGuard, CallRecordSink, Direction, MemoryCallRecordSink, Path as ConnPath,
-    TracingCallRecordSink, CALL_RECORD_SCHEMA_VERSION,
+    connection_bytes, connection_path, connection_rtt, outcome_from_call_error, AuthOutcome,
+    AuthRule, CallRecord, CallRecordGuard, CallRecordSink, Direction, FanoutCallRecordSink,
+    JsonDirCallRecordSink, MemoryCallRecordSink, Path as ConnPath, TracingCallRecordSink,
+    CALL_RECORD_SCHEMA_VERSION,
 };
 pub use timing::{
     callee_budget, caller_budget, quic_idle_timeout, quic_keep_alive, uat_transport_config,
@@ -35,7 +36,7 @@ pub use local::{
     connect as connect_local, dial_via_sock, inbox_via_sock, sock_path, InboxEvent, LocalBindError,
     LocalClientError, LocalCodecError, LocalRequest, LocalResponse, SOCK_FILE, SOCK_MODE,
 };
-pub use node::{DaemonError, Node};
+pub use node::{DaemonError, DialFinish, Node, NodeBindOpts};
 
 /// Errors at the iroh identity edge.
 #[derive(Debug, Error)]

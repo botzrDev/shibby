@@ -121,12 +121,12 @@ fn assert_common(r: &uat_node::CallRecord, direction: Direction) {
 async fn completed_emits_one_record_each_side() {
     let pair = Pair::bind(CalleeBehavior::StubComplete, true).await;
     let task = TaskId::from_u128(0x10601);
-    let outcome = pair
+    let finish = pair
         .caller
         .dial(pair.callee.addr(), submit_ms(task.as_u128(), 30_000))
         .await
         .expect("dial");
-    assert_eq!(outcome, Outcome::Completed);
+    assert_eq!(finish.outcome, Outcome::Completed);
 
     wait_records(&pair.caller_records, 1).await;
     wait_records(&pair.callee_records, 1).await;
@@ -159,17 +159,18 @@ async fn failed_deadline_emits_failed_record() {
     // must still be Failed(DeadlineExceeded) with the Submit task id.
     let pair = Pair::bind(CalleeBehavior::HangAfterAccept, true).await;
     let task = TaskId::from_u128(0x10602);
-    let outcome = pair
+    let finish = pair
         .caller
         .dial(pair.callee.addr(), submit_ms(task.as_u128(), 500))
         .await
         .expect("dial");
     assert!(
         matches!(
-            outcome,
+            finish.outcome,
             Outcome::Failed(FailureCode::DeadlineExceeded) | Outcome::PeerLost
         ),
-        "caller outcome={outcome:?}"
+        "caller outcome={:?}",
+        finish.outcome
     );
 
     wait_records(&pair.callee_records, 1).await;
@@ -454,7 +455,12 @@ async fn allowlist_deny_emits_denied_record_task_none() {
 
     // Caller sees loss/close; callee must still emit exactly one deny record.
     match result {
-        Err(_) | Ok(Outcome::PeerLost) | Ok(Outcome::Closed(_)) => {}
+        Err(_) => {}
+        Ok(finish)
+            if matches!(
+                finish.outcome,
+                Outcome::PeerLost | Outcome::Closed(_)
+            ) => {}
         Ok(other) => panic!("expected reject/loss, got {other:?}"),
     }
 

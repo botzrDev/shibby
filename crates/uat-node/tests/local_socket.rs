@@ -65,7 +65,7 @@ async fn dial_through_local_socket_completes() {
     let addrs: Vec<_> = peer.ip_addrs().copied().collect();
     assert!(!addrs.is_empty(), "callee should advertise ip addrs");
 
-    let outcome = dial_via_sock(
+    let (outcome, _rtt_ms) = dial_via_sock(
         &caller_home,
         &peer.id.to_string(),
         &addrs,

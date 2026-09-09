@@ -48,9 +48,9 @@ fn print_usage() {
 uat — client of $UAT_HOME/node.sock (HLX-108)
 
   uat dial <peer> --deadline <ms> --content-type <mime> --addr <ip:port> [--addr ...]
-      Body from stdin. Prints one line: outcome=<Debug>. Exit 0 iff Completed.
+      Body from stdin. Prints rtt_ms=... then outcome=<Debug>. Exit 0 iff Completed.
       Requires a running daemon (`uat-node listen`) with node.sock.
-      --addr is required until discovery (HLX-109); loopback is fine for M1.
+      --addr is required for M1; discovery/relay via daemon `UAT_RELAY=1` / `--relay`.
 
   uat listen
       Long-running Inbox poller. The daemon (`uat-node listen`) already answers
@@ -150,10 +150,15 @@ async fn cmd_dial(args: Vec<String>) -> Result<()> {
         body,
     };
 
-    let outcome = dial_via_sock(&home, &parsed.peer, &parsed.addrs, submit)
+    let (outcome, rtt_ms) = dial_via_sock(&home, &parsed.peer, &parsed.addrs, submit)
         .await
         .map_err(format_client_err)?;
-    // One line, pipeable / assertable (HLX-108 exit proof).
+    // Pipeable lines for HLX-108 / HLX-109 runbook capture.
+    if let Some(ms) = rtt_ms {
+        println!("rtt_ms={ms}");
+    } else {
+        println!("rtt_ms=unknown");
+    }
     println!("outcome={outcome:?}");
     match outcome {
         Outcome::Completed => Ok(()),
