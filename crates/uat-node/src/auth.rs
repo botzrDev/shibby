@@ -1,6 +1,6 @@
 //! Connection and Submit authorization seam (HLX-110).
 //!
-//! Connection accept still gates on [`Verify`] (allowlist). The typed
+//! Connection accept still gates on [`Verify`] (allowlist, or open when biscuit roots are configured). The typed
 //! `UnverifiedSubmit` → `verify` → `AuthorizedSubmit` path (in `uat-policy`)
 //! is what F4/S6 and handlers use once a `Submit` header is in hand.
 
@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use uat_core::{Message, NodeId, SubmitAuthorizer};
 use uat_policy::{AuthError, AuthorizedSubmit, Policy, PolicySubmitAuth, UnverifiedSubmit};
 
-/// Back-compat name: answering policy is an allowlist today (token path in HLX-111).
+/// Back-compat name: answering policy (allowlist + optional Biscuit roots).
 pub type Allowlist = Policy;
 
 /// Decides whether a remote [`NodeId`] may place or complete a call.
@@ -47,7 +47,9 @@ impl<T: Verify + ?Sized> Verify for &T {
 
 impl Verify for Policy {
     fn verify_peer(&self, peer: NodeId) -> bool {
-        self.contains(peer)
+        // Allowlist OR biscuit roots configured (token callers pass the
+        // connection gate; Submit still requires a valid token / allowlist).
+        self.contains(peer) || self.has_biscuit_roots()
     }
 
     fn policy(&self) -> &Policy {

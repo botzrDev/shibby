@@ -16,6 +16,7 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.91"
 
 [workspace.dependencies]
+biscuit-auth = "6.0.0"
 anyhow = "1.0.104"
 base64 = "0.22"
 serde = { version = "1.0.229", features = ["derive"] }

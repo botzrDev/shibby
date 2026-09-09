@@ -460,7 +460,7 @@ async fn callee_loop(
         Err(err) => {
             let reason = match &err {
                 AuthError::Denied(_) => "submit denied by allowlist".to_string(),
-                AuthError::TokenNotImplemented => "biscuit token not implemented".to_string(),
+                AuthError::TokenUnauthorized => "biscuit token unauthorized".to_string(),
                 other => other.to_string(),
             };
             let failed = Message::Failed {
