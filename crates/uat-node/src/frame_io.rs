@@ -38,11 +38,8 @@ impl FrameIoError {
     }
 }
 
-/// Read one full UAT frame and decode it with `auth`.
-pub async fn read_message(
-    recv: &mut RecvStream,
-    auth: &impl SubmitAuthorizer,
-) -> Result<Message, FrameIoError> {
+/// Read one full length-prefixed frame into a buffer (no decode).
+pub async fn read_frame(recv: &mut RecvStream) -> Result<Vec<u8>, FrameIoError> {
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf)
         .await
@@ -59,6 +56,15 @@ pub async fn read_message(
     let mut frame = Vec::with_capacity(4 + len as usize);
     frame.extend_from_slice(&len_buf);
     frame.extend_from_slice(&payload);
+    Ok(frame)
+}
+
+/// Read one full UAT frame and decode it with `auth`.
+pub async fn read_message(
+    recv: &mut RecvStream,
+    auth: &impl SubmitAuthorizer,
+) -> Result<Message, FrameIoError> {
+    let frame = read_frame(recv).await?;
     decode(&frame, auth).map_err(FrameIoError::from)
 }
 
