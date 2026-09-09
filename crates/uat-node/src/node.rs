@@ -20,8 +20,8 @@ use crate::local::{
     bind_sock, remove_sock_file, spawn_local_accept_loop, InboxEvent, LocalBindError, SOCK_FILE,
 };
 use crate::record::{
-    connection_bytes, AuthOutcome, CallRecord, CallRecordSink, Direction, Path as ConnPath,
-    TracingCallRecordSink, CALL_RECORD_SCHEMA_VERSION,
+    connection_bytes, connection_path, connection_rtt, AuthOutcome, CallRecord, CallRecordSink,
+    Direction, TracingCallRecordSink, CALL_RECORD_SCHEMA_VERSION,
 };
 use crate::timing::uat_transport_config;
 use crate::{public_key_to_node_id, NodeError};
@@ -54,6 +54,48 @@ pub enum DaemonError {
     LocalSock(#[from] LocalBindError),
 }
 
+/// Options for [`Node`] endpoint bind (HLX-109).
+///
+/// Default keeps [`RelayMode::Disabled`] so same-host CI / loopback e2e stay
+/// offline. Set [`NodeBindOpts::relay`] (or CLI `--relay` / `UAT_RELAY=1`) to
+/// use iroh's default n0 relay + discovery from [`presets::N0`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NodeBindOpts {
+    /// When `true`, [`RelayMode::Default`]; when `false`, [`RelayMode::Disabled`].
+    pub relay: bool,
+}
+
+impl NodeBindOpts {
+    /// Same-host / CI default: relays off.
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self { relay: false }
+    }
+
+    /// Multi-network runs: default iroh relays + discovery.
+    #[must_use]
+    pub const fn with_relay() -> Self {
+        Self { relay: true }
+    }
+
+    fn relay_mode(self) -> RelayMode {
+        if self.relay {
+            RelayMode::Default
+        } else {
+            RelayMode::Disabled
+        }
+    }
+}
+
+/// Result of [`Node::dial`]: terminal outcome plus optional RTT.
+#[derive(Clone, Debug)]
+pub struct DialFinish {
+    /// How the call ended.
+    pub outcome: Outcome,
+    /// Best-effort RTT sampled after connect (selected iroh path).
+    pub rtt: Option<std::time::Duration>,
+}
+
 /// Owns an iroh [`Endpoint`], accept loop, and one Call task per connection.
 pub struct Node {
     endpoint: Endpoint,
@@ -73,8 +115,8 @@ pub struct Node {
 impl Node {
     /// Bind a new endpoint using `identity`, with connection/Submit auth via `verify`.
     ///
-    /// Relay is disabled so two processes on one host can dial via [`EndpointAddr`]
-    /// direct addresses (exit proof / local CI). Discovery/relay land with later tickets.
+    /// Default bind uses [`NodeBindOpts::disabled`] (relay off) for same-host CI.
+    /// Multi-network runs pass [`NodeBindOpts::with_relay`] (see HLX-109).
     pub async fn bind(
         identity: Identity,
         verify: Arc<dyn Verify>,
@@ -108,11 +150,33 @@ impl Node {
         callee_behavior: CalleeBehavior,
         records: Arc<dyn CallRecordSink>,
     ) -> Result<Arc<Self>, DaemonError> {
+        Self::bind_with_opts(
+            identity,
+            verify,
+            cancel,
+            callee_behavior,
+            records,
+            NodeBindOpts::default(),
+        )
+        .await
+    }
+
+    /// Full bind entry: callee behavior, record sink, and [`NodeBindOpts`] (relay on/off).
+    pub async fn bind_with_opts(
+        identity: Identity,
+        verify: Arc<dyn Verify>,
+        cancel: CancellationToken,
+        callee_behavior: CalleeBehavior,
+        records: Arc<dyn CallRecordSink>,
+        opts: NodeBindOpts,
+    ) -> Result<Arc<Self>, DaemonError> {
         let secret = identity.secret_key().clone();
+        let relay_mode = opts.relay_mode();
         let endpoint = Endpoint::builder(presets::N0)
             .secret_key(secret)
             .alpns(vec![uat_core::ALPN.to_vec()])
-            .relay_mode(RelayMode::Disabled)
+            // presets::N0 enables discovery + default relays; override for CI.
+            .relay_mode(relay_mode)
             .transport_config(uat_transport_config())
             .bind()
             .await
@@ -165,6 +229,19 @@ impl Node {
     ) -> Result<Arc<Self>, DaemonError> {
         let identity = load_or_create_at(&uat_home.join(IDENTITY_FILE))?;
         Self::bind_with_behavior_and_sink(identity, verify, cancel, callee_behavior, records).await
+    }
+
+    /// [`Self::bind_at_with_behavior_and_sink`] plus [`NodeBindOpts`].
+    pub async fn bind_at_with_opts(
+        uat_home: &Path,
+        verify: Arc<dyn Verify>,
+        cancel: CancellationToken,
+        callee_behavior: CalleeBehavior,
+        records: Arc<dyn CallRecordSink>,
+        opts: NodeBindOpts,
+    ) -> Result<Arc<Self>, DaemonError> {
+        let identity = load_or_create_at(&uat_home.join(IDENTITY_FILE))?;
+        Self::bind_with_opts(identity, verify, cancel, callee_behavior, records, opts).await
     }
 
     /// Shared call-record sink (tests).
@@ -298,7 +375,7 @@ impl Node {
                     reason: "not on allowlist".into(),
                 },
                 outcome: Outcome::Closed(CloseCode::Normal),
-                path: ConnPath::Direct,
+                path: connection_path(&conn),
                 bytes_sent,
                 bytes_recv,
                 wall_time_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -331,11 +408,14 @@ impl Node {
     }
 
     /// Dial `peer`, open one stream, run the caller side of `submit`.
+    ///
+    /// On connect success, prints `rtt_ms=<n>` to stdout when iroh reports an RTT
+    /// (HLX-109 recorded-run requirement). Also returns it on [`DialFinish`].
     pub async fn dial(
         &self,
         peer: impl Into<EndpointAddr>,
         submit: Message,
-    ) -> Result<Outcome, DaemonError> {
+    ) -> Result<DialFinish, DaemonError> {
         let addr = peer.into();
 
         let conn = self
@@ -344,9 +424,17 @@ impl Node {
             .await
             .map_err(|e| DaemonError::Connect(e.to_string()))?;
 
+        let rtt = connection_rtt(&conn);
+        if let Some(rtt) = rtt {
+            let rtt_ms = u64::try_from(rtt.as_millis()).unwrap_or(u64::MAX);
+            println!("rtt_ms={rtt_ms}");
+        } else {
+            println!("rtt_ms=unknown");
+        }
+
         let cancel = self.cancel.child_token();
         let outcome = run_caller(conn, submit, cancel, Arc::clone(&self.records)).await?;
-        Ok(outcome)
+        Ok(DialFinish { outcome, rtt })
     }
 
     /// Cancel accept loop and call tasks, wait for them, then close the endpoint.

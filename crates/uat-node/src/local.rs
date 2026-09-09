@@ -83,6 +83,9 @@ pub enum LocalRequest {
 pub enum LocalResponse {
     DialResult {
         outcome: Outcome,
+        /// Best-effort RTT in milliseconds after connect (HLX-109).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rtt_ms: Option<u64>,
     },
     /// No inbound event ready (M1 one-shot).
     InboxIdle,
@@ -420,7 +423,7 @@ pub async fn dial_via_sock(
     peer: &str,
     addrs: &[SocketAddr],
     submit: Message,
-) -> Result<Outcome, LocalClientError> {
+) -> Result<(Outcome, Option<u64>), LocalClientError> {
     let Message::Submit {
         task,
         deadline,
@@ -447,7 +450,7 @@ pub async fn dial_via_sock(
         body,
     };
     match roundtrip(&mut stream, &req).await? {
-        LocalResponse::DialResult { outcome } => Ok(outcome),
+        LocalResponse::DialResult { outcome, rtt_ms } => Ok((outcome, rtt_ms)),
         LocalResponse::Error { message } => Err(LocalClientError::Daemon(message)),
         other => Err(LocalClientError::Daemon(format!(
             "unexpected response to dial: {other:?}"
@@ -538,7 +541,10 @@ async fn handle_client(
             body,
         } => match build_dial(peer, addrs, task, deadline, content_type, credential, body) {
             Ok((addr, submit)) => match node.dial(addr, submit).await {
-                Ok(outcome) => LocalResponse::DialResult { outcome },
+                Ok(finish) => LocalResponse::DialResult {
+                    outcome: finish.outcome,
+                    rtt_ms: finish.rtt.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+                },
                 Err(err) => LocalResponse::Error {
                     message: err.to_string(),
                 },

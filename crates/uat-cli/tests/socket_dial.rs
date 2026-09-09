@@ -80,10 +80,13 @@ async fn uat_cli_dials_through_socket_and_errors_without_daemon() {
         "uat dial failed status={} stdout={stdout} stderr={stderr}",
         output.status
     );
-    assert_eq!(
-        stdout.trim(),
-        "outcome=Completed",
-        "unexpected dial stdout={stdout}"
+    assert!(
+        stdout.lines().any(|l| l == "outcome=Completed"),
+        "missing outcome=Completed in dial stdout={stdout}"
+    );
+    assert!(
+        stdout.lines().any(|l| l.starts_with("rtt_ms=")),
+        "missing rtt_ms= in dial stdout={stdout}"
     );
 
     let lonely = temp_uat_home("lonely");

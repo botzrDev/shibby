@@ -1,6 +1,7 @@
-//! Minimal `uat-node` binary: listen or dial a one-shot stub call (HLX-104).
+//! `uat-node` binary: listen or dial a one-shot stub call (HLX-104 / HLX-109).
 //!
-//! CLI polish is HLX-108. This binary is enough for a manual two-process exit check.
+//! Default bind keeps iroh relay disabled for same-host CI. Pass `--relay` or
+//! set `UAT_RELAY=1` for real multi-network runs (n0 default relays + discovery).
 
 use std::env;
 use std::net::SocketAddr;
@@ -13,7 +14,10 @@ use iroh::{EndpointAddr, EndpointId, TransportAddr};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio_util::sync::CancellationToken;
 use uat_core::{ContentType, Deadline, Message, Outcome, TaskId};
-use uat_node::{public_key_to_node_id, Allowlist, Node, Verify};
+use uat_node::{
+    public_key_to_node_id, Allowlist, CalleeBehavior, CallRecordSink, FanoutCallRecordSink,
+    JsonDirCallRecordSink, Node, NodeBindOpts, TracingCallRecordSink, Verify,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -40,21 +44,46 @@ async fn main() -> Result<()> {
 fn print_usage() {
     eprintln!(
         "\
-uat-node (HLX-104/107)
+uat-node (HLX-104/107/109)
 
-  uat-node listen [--allow <endpoint-id>]...
-  uat-node dial <endpoint-id> --addr <ip:port> [--addr <ip:port>]...
+  uat-node listen [--allow <endpoint-id>]... [--relay]
+  uat-node dial <endpoint-id> --addr <ip:port> [--addr <ip:port>]... [--relay]
 
 Listen also binds $UAT_HOME/node.sock (mode 0600) for uat-cli / local clients.
+CallRecords are written as JSON under $UAT_HOME/records/ after each call.
 
 Environment:
-  UAT_HOME   identity + node.sock directory (default ~/.uat)
+  UAT_HOME    identity + node.sock + records directory (default ~/.uat)
+  UAT_RELAY   if 1/true/yes, enable default iroh relay+discovery (same as --relay)
 "
     );
 }
 
+fn env_relay_enabled() -> bool {
+    match env::var("UAT_RELAY") {
+        Ok(v) => {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+        }
+        Err(_) => false,
+    }
+}
+
+fn records_dir(home: &std::path::Path) -> PathBuf {
+    home.join("records")
+}
+
+fn record_sink_for(home: &std::path::Path) -> Arc<dyn CallRecordSink> {
+    let json = JsonDirCallRecordSink::new(records_dir(home));
+    FanoutCallRecordSink::new()
+        .push(Arc::new(TracingCallRecordSink) as Arc<dyn CallRecordSink>)
+        .push(Arc::new(json) as Arc<dyn CallRecordSink>)
+        .shared()
+}
+
 async fn cmd_listen(args: Vec<String>) -> Result<()> {
     let mut allow = Allowlist::empty();
+    let mut relay = env_relay_enabled();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -68,13 +97,30 @@ async fn cmd_listen(args: Vec<String>) -> Result<()> {
                 allow.insert(public_key_to_node_id(&id));
                 i += 1;
             }
+            "--relay" => {
+                relay = true;
+                i += 1;
+            }
             other => bail!("unknown listen arg: {other}"),
         }
     }
 
     let home = uat_home_dir()?;
     let cancel = CancellationToken::new();
-    let node = Node::bind_at(&home, Arc::new(allow) as Arc<dyn Verify>, cancel.clone()).await?;
+    let opts = if relay {
+        NodeBindOpts::with_relay()
+    } else {
+        NodeBindOpts::disabled()
+    };
+    let node = Node::bind_at_with_opts(
+        &home,
+        Arc::new(allow) as Arc<dyn Verify>,
+        cancel.clone(),
+        CalleeBehavior::StubComplete,
+        record_sink_for(&home),
+        opts,
+    )
+    .await?;
     node.spawn_accept_loop();
     node.spawn_local_socket(&home).await?;
 
@@ -85,6 +131,8 @@ async fn cmd_listen(args: Vec<String>) -> Result<()> {
     if let Some(sock) = node.local_sock_path().await {
         println!("sock={}", sock.display());
     }
+    println!("relay={}", if relay { "on" } else { "off" });
+    println!("records_dir={}", records_dir(&home).display());
     println!("listening (SIGTERM to stop)");
 
     wait_sigterm(cancel.clone()).await;
@@ -98,6 +146,7 @@ async fn cmd_dial(args: Vec<String>) -> Result<()> {
     }
     let peer_id: EndpointId = args[0].parse().context("parse peer endpoint id")?;
     let mut addrs: Vec<SocketAddr> = Vec::new();
+    let mut relay = env_relay_enabled();
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -111,6 +160,10 @@ async fn cmd_dial(args: Vec<String>) -> Result<()> {
                 addrs.push(a);
                 i += 1;
             }
+            "--relay" => {
+                relay = true;
+                i += 1;
+            }
             other => bail!("unknown dial arg: {other}"),
         }
     }
@@ -120,13 +173,24 @@ async fn cmd_dial(args: Vec<String>) -> Result<()> {
 
     let home = uat_home_dir()?;
     let cancel = CancellationToken::new();
+    let opts = if relay {
+        NodeBindOpts::with_relay()
+    } else {
+        NodeBindOpts::disabled()
+    };
     // Dialer allowlist unused for outbound; empty is fine.
-    let node = Node::bind_at(
+    let node = Node::bind_at_with_opts(
         &home,
         Arc::new(Allowlist::empty()) as Arc<dyn Verify>,
         cancel.clone(),
+        CalleeBehavior::StubComplete,
+        record_sink_for(&home),
+        opts,
     )
     .await?;
+
+    println!("relay={}", if relay { "on" } else { "off" });
+    println!("records_dir={}", records_dir(&home).display());
 
     let transports = addrs.into_iter().map(TransportAddr::Ip);
     let peer = EndpointAddr::from_parts(peer_id, transports);
@@ -139,7 +203,7 @@ async fn cmd_dial(args: Vec<String>) -> Result<()> {
         body: Vec::new(),
     };
 
-    let outcome = tokio::select! {
+    let finish = tokio::select! {
         _ = wait_sigterm(cancel.clone()) => {
             node.shutdown().await;
             bail!("cancelled before call completed");
@@ -147,8 +211,8 @@ async fn cmd_dial(args: Vec<String>) -> Result<()> {
         result = node.dial(peer, submit) => result?,
     };
 
-    println!("outcome={outcome:?}");
-    match outcome {
+    println!("outcome={:?}", finish.outcome);
+    match finish.outcome {
         Outcome::Completed => {}
         other => bail!("call did not complete: {other:?}"),
     }

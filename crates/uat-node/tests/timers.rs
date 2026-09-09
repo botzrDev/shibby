@@ -129,7 +129,8 @@ async fn l3_connection_loss_terminates_within_quic_idle() {
     .expect("dial task join");
 
     match result {
-        Ok(outcome) => {
+        Ok(finish) => {
+            let outcome = finish.outcome;
             assert!(
                 matches!(
                     outcome,

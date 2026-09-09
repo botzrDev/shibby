@@ -25,6 +25,10 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 # HLX-108 loopback call (after cargo build -p uat-cli -p uat-node):
 #   ./scripts/e2e-call.sh
+# HLX-109 two-host prep (relay on; real run is manual — see docs):
+#   ./scripts/two-host-listen.sh --allow <peer>
+#   ./scripts/two-host-dial.sh <peer> --addr <ip:port>
+#   docs/m1-two-host-run/README.md
 ```
 
 Pinned MSRV: see `rust-toolchain.toml` and `workspace.package.rust-version`.

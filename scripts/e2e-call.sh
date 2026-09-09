@@ -103,16 +103,17 @@ if [[ "$PEER" != "$CALLEE_ID" ]]; then
   exit 1
 fi
 
-OUTCOME="$(
+DIAL_OUT="$(
   printf 'hlx-108-e2e' | UAT_HOME="$CALLER_HOME" "$UAT_BIN" dial "$PEER" \
     --deadline 30000 \
     --content-type text/plain \
     --addr "$ADDR"
 )"
 
-echo "$OUTCOME"
+echo "$DIAL_OUT"
+OUTCOME="$(printf '%s\n' "$DIAL_OUT" | grep -m1 '^outcome=' || true)"
 if [[ "$OUTCOME" != "outcome=Completed" ]]; then
-  echo "e2e-call: expected outcome=Completed, got: $OUTCOME" >&2
+  echo "e2e-call: expected outcome=Completed, got: $DIAL_OUT" >&2
   exit 1
 fi
 
