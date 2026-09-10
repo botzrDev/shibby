@@ -23,6 +23,7 @@ use crate::record::{
     connection_bytes, connection_path, connection_rtt, AuthOutcome, CallRecord, CallRecordSink,
     Direction, TracingCallRecordSink, CALL_RECORD_SCHEMA_VERSION,
 };
+use uat_policy::{RateLimitConfig, RateLimiter};
 use crate::timing::uat_transport_config;
 use crate::{public_key_to_node_id, NodeError};
 
@@ -54,28 +55,56 @@ pub enum DaemonError {
     LocalSock(#[from] LocalBindError),
 }
 
-/// Options for [`Node`] endpoint bind (HLX-109).
+/// Options for [`Node`] endpoint bind (HLX-109 / HLX-113).
 ///
 /// Default keeps [`RelayMode::Disabled`] so same-host CI / loopback e2e stay
 /// offline. Set [`NodeBindOpts::relay`] (or CLI `--relay` / `UAT_RELAY=1`) to
 /// use iroh's default n0 relay + discovery from [`presets::N0`].
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+///
+/// Rate-limit caps default to [`RateLimitConfig::defaults`] (8 concurrent, 60
+/// calls/min, 8 live frames per peer). Override via [`NodeBindOpts::rate_limits`]
+/// for tests or tighter production profiles.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NodeBindOpts {
     /// When `true`, [`RelayMode::Default`]; when `false`, [`RelayMode::Disabled`].
     pub relay: bool,
+    /// Per-caller-key admission caps (HLX-113).
+    pub rate_limits: RateLimitConfig,
+}
+
+impl Default for NodeBindOpts {
+    fn default() -> Self {
+        Self {
+            relay: false,
+            rate_limits: RateLimitConfig::defaults(),
+        }
+    }
 }
 
 impl NodeBindOpts {
-    /// Same-host / CI default: relays off.
+    /// Same-host / CI default: relays off, default rate limits.
     #[must_use]
     pub const fn disabled() -> Self {
-        Self { relay: false }
+        Self {
+            relay: false,
+            rate_limits: RateLimitConfig::defaults(),
+        }
     }
 
     /// Multi-network runs: default iroh relays + discovery.
     #[must_use]
     pub const fn with_relay() -> Self {
-        Self { relay: true }
+        Self {
+            relay: true,
+            rate_limits: RateLimitConfig::defaults(),
+        }
+    }
+
+    /// Override rate-limit caps (tests / HLX-113).
+    #[must_use]
+    pub const fn with_rate_limits(mut self, rate_limits: RateLimitConfig) -> Self {
+        self.rate_limits = rate_limits;
+        self
     }
 
     fn relay_mode(self) -> RelayMode {
@@ -105,6 +134,8 @@ pub struct Node {
     tracker: TaskTracker,
     callee_behavior: CalleeBehavior,
     records: Arc<dyn CallRecordSink>,
+    /// Per-peer admission caps (HLX-113); checked before `accept_bi`.
+    rate_limiter: Arc<RateLimiter>,
     /// Notifies local-socket Inbox polls of finished inbound calls (M1 one-shot).
     inbox_tx: mpsc::Sender<InboxEvent>,
     inbox_rx: tokio::sync::Mutex<Option<mpsc::Receiver<InboxEvent>>>,
@@ -183,6 +214,7 @@ impl Node {
             .map_err(|e| DaemonError::Bind(e.to_string()))?;
 
         let (inbox_tx, inbox_rx) = mpsc::channel(32);
+        let rate_limiter = RateLimiter::new(opts.rate_limits).shared();
         let node = Arc::new(Self {
             endpoint,
             identity,
@@ -191,6 +223,7 @@ impl Node {
             tracker: TaskTracker::new(),
             callee_behavior,
             records,
+            rate_limiter,
             inbox_tx,
             inbox_rx: tokio::sync::Mutex::new(Some(inbox_rx)),
             sock_home: tokio::sync::Mutex::new(None),
@@ -248,6 +281,12 @@ impl Node {
     #[must_use]
     pub fn record_sink(&self) -> Arc<dyn CallRecordSink> {
         Arc::clone(&self.records)
+    }
+
+    /// Shared rate limiter (tests / HLX-113).
+    #[must_use]
+    pub fn rate_limiter(&self) -> Arc<RateLimiter> {
+        Arc::clone(&self.rate_limiter)
     }
 
     /// This node's stable [`NodeId`].
@@ -383,7 +422,34 @@ impl Node {
             return Ok(());
         }
 
+        // HLX-113: rate limit is separate from auth — after allowlist, before accept_bi.
+        let permit = match self.rate_limiter.try_admit(peer) {
+            Ok(permit) => permit,
+            Err(reason) => {
+                debug!(?peer, ?reason, "rejecting dialer: rate limited");
+                close_with(&conn, CloseCode::RateLimited);
+                let (bytes_sent, bytes_recv) = connection_bytes(&conn);
+                // Close code is the message: no TaskId yet, no stream accepted.
+                self.records.emit(CallRecord {
+                    schema_version: CALL_RECORD_SCHEMA_VERSION,
+                    started_at,
+                    task: None,
+                    direction: Direction::Inbound,
+                    peer,
+                    authorization: AuthOutcome::NotReached,
+                    outcome: Outcome::Closed(CloseCode::RateLimited),
+                    path: connection_path(&conn),
+                    bytes_sent,
+                    bytes_recv,
+                    wall_time_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+                });
+                return Ok(());
+            }
+        };
+
         let cancel = self.cancel.child_token();
+        // Hold permit for the full call so concurrent/live-frames decrement on end.
+        let _permit = permit;
         match run_callee_with(
             conn,
             peer,

@@ -1,4 +1,4 @@
-//! Answering policy (HLX-110 / §6.1 + HLX-111 Biscuit facts + HLX-112 spent set).
+//! Answering policy (HLX-110 / §6.1 + HLX-111 Biscuit facts + HLX-112 spent set + HLX-113 rate limits).
 //!
 //! Default deny. An inbound `Submit` is admitted only via allowlist or a
 //! verifying Biscuit. There is no answer-everyone flag.
@@ -31,6 +31,13 @@
 //! re-admits a spent one-shot until it expires. UAT protects against replay
 //! within a running node only; issuers should keep one-shot expiries short.
 //! Do not add a database here.
+//!
+//! # Rate limits (HLX-113)
+//!
+//! [`RateLimiter`] enforces per-[`NodeId`] caps — concurrent calls, calls per
+//! minute, and live frames — at connection admission time. See [`rate_limit`]
+//! for defaults and semantics. Wired by `uat-node` after the allowlist gate and
+//! **before** `accept_bi`; exceeding any cap closes with `CloseCode::RateLimited`.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -46,6 +53,12 @@ use uat_core::{ContentType, Credential, Deadline, Message, NodeId, TaskId};
 
 /// Re-export for configuring root keys and minting test tokens.
 pub use biscuit_auth::{builder, KeyPair};
+
+pub mod rate_limit;
+pub use rate_limit::{
+    RateLimitConfig, RateLimitExceeded, RateLimitPermit, RateLimiter,
+    DEFAULT_MAX_CALLS_PER_MINUTE, DEFAULT_MAX_CONCURRENT_CALLS, DEFAULT_MAX_LIVE_FRAMES,
+};
 
 /// Errors from [`UnverifiedSubmit::verify`] and related constructors.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
