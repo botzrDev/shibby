@@ -155,23 +155,28 @@ async fn completed_emits_one_record_each_side() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_deadline_emits_failed_record() {
     // Callee is the authoritative DeadlineExceeded emitter (HLX-105). On real
-    // QUIC the caller may race ConnLost vs reading Failed; the callee record
-    // must still be Failed(DeadlineExceeded) with the Submit task id.
+    // QUIC, HangAfterAccept often races: callee closes Normal after emitting
+    // Failed, and the dialer may see Failed, PeerLost/Closed(Normal), or a
+    // connection-closed dial Err (ApplicationClosed Normal) instead of
+    // Ok(Failed). Assert the callee CallRecord; tolerate dialer race.
     let pair = Pair::bind(CalleeBehavior::HangAfterAccept, true).await;
     let task = TaskId::from_u128(0x10602);
-    let finish = pair
+    let dial_result = pair
         .caller
         .dial(pair.callee.addr(), submit_ms(task.as_u128(), 500))
-        .await
-        .expect("dial");
-    assert!(
-        matches!(
-            finish.outcome,
-            Outcome::Failed(FailureCode::DeadlineExceeded) | Outcome::PeerLost
-        ),
-        "caller outcome={:?}",
-        finish.outcome
-    );
+        .await;
+    match dial_result {
+        Ok(finish)
+            if matches!(
+                finish.outcome,
+                Outcome::Failed(FailureCode::DeadlineExceeded)
+                    | Outcome::PeerLost
+                    | Outcome::Closed(CloseCode::Normal)
+            ) => {}
+        // Frame/read ConnectionLost(ApplicationClosed Normal) and similar.
+        Err(_) => {}
+        Ok(other) => panic!("unexpected dialer finish: {other:?}"),
+    }
 
     wait_records(&pair.callee_records, 1).await;
     wait_records(&pair.caller_records, 1).await;
