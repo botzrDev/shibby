@@ -458,6 +458,11 @@ impl CallRecordGuard {
         self.task = Some(task);
     }
 
+    /// Clear the task id (e.g. peer closed RateLimited before any stream accept).
+    pub fn clear_task(&mut self) {
+        self.task = None;
+    }
+
     /// Override authorization (e.g. late Submit deny).
     pub fn set_authorization(&mut self, authorization: AuthOutcome) {
         self.authorization = authorization;

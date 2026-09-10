@@ -14,7 +14,10 @@ use thiserror::Error;
 use uat_core::NodeId;
 
 pub use auth::{authorize_submit_header, Allowlist, PeerSubmitAuth, Verify};
-pub use uat_policy::{AuthError, AuthorizedSubmit, Policy, UnverifiedSubmit};
+pub use uat_policy::{
+    AuthError, AuthorizedSubmit, Policy, RateLimitConfig, RateLimitExceeded, RateLimiter,
+    UnverifiedSubmit,
+};
 pub use call::{
     close_with, drive_chan_call, run_callee, run_callee_with, run_caller, run_caller_with,
     watch_second_stream, CallError, CalleeBehavior, CallerOpts, TimerEvent,

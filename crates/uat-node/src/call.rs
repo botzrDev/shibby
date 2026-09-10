@@ -170,9 +170,8 @@ pub async fn run_caller_with(
         AuthOutcome::NotReached,
         conn.clone(),
     );
-    if let Message::Submit { task, .. } = &submit {
-        record.set_task(*task);
-    }
+    // task stays None until Submit is written — rate-limit / pre-stream closes
+    // must leave task=None (HLX-113).
 
     if !matches!(submit, Message::Submit { .. }) {
         record.set_outcome(Outcome::Closed(CloseCode::ProtocolViolation));
@@ -182,11 +181,23 @@ pub async fn run_caller_with(
     let (mut send, mut recv) = match timeout(quic_idle_timeout(), conn.open_bi()).await {
         Ok(Ok(pair)) => pair,
         Ok(Err(e)) => {
+            // Peer may have closed with RateLimited before accepting any stream
+            // (HLX-113). Prefer the application close code over generic PeerLost.
+            if let Some(closed) = conn.close_reason() {
+                let code = close_code_from_conn_err(&closed);
+                record.set_outcome(Outcome::Closed(code));
+                return Err(CallError::Connection(e.to_string()));
+            }
             let err = CallError::StreamSetup(e.to_string());
             record.set_outcome(crate::record::outcome_from_call_error(&err));
             return Err(err);
         }
         Err(_) => {
+            if let Some(closed) = conn.close_reason() {
+                let code = close_code_from_conn_err(&closed);
+                record.set_outcome(Outcome::Closed(code));
+                return Err(CallError::NetworkTimeout);
+            }
             let err = CallError::StreamSetup("open_bi timed out".into());
             record.set_outcome(crate::record::outcome_from_call_error(&err));
             return Err(err);
@@ -203,6 +214,7 @@ pub async fn run_caller_with(
         submit,
         &cancel,
         &mut opts.request_cancel,
+        &mut record,
     )
     .await;
     guard_cancel.cancel();
@@ -218,9 +230,10 @@ async fn caller_loop(
     submit: Message,
     cancel: &CancellationToken,
     request_cancel: &mut Option<oneshot::Receiver<()>>,
+    record: &mut CallRecordGuard,
 ) -> Result<Outcome, CallError> {
-    let deadline = match &submit {
-        Message::Submit { deadline, .. } => *deadline,
+    let (deadline, task) = match &submit {
+        Message::Submit { deadline, task, .. } => (*deadline, *task),
         _ => return Err(CallError::Illegal),
     };
     let budget = caller_budget(deadline);
@@ -233,11 +246,31 @@ async fn caller_loop(
     let mut call_timer = Box::pin(tokio::time::sleep(budget));
 
     if let Err(err) = await_network(budget, write_message(send, &submit)).await {
+        if let Some(closed) = conn.close_reason() {
+            let code = close_code_from_conn_err(&closed);
+            if code == CloseCode::RateLimited {
+                record.clear_task();
+                record.set_outcome(Outcome::Closed(code));
+                return Err(CallError::Connection(err.to_string()));
+            }
+        }
         if let CallError::Frame(ref fe) = err {
             close_on_frame_err(conn, fe);
         }
         return Err(err);
     }
+    // Submit reached the wire — now the audit record may carry the task id.
+    // If the peer already closed RateLimited (never accepted the stream), prefer
+    // the close-code audit shape over a locally-buffered Submit.
+    if let Some(closed) = conn.close_reason() {
+        let code = close_code_from_conn_err(&closed);
+        if code == CloseCode::RateLimited {
+            record.clear_task();
+            record.set_outcome(Outcome::Closed(code));
+            return Ok(Outcome::Closed(code));
+        }
+    }
+    record.set_task(task);
 
     loop {
         if let CallerState::Terminal(outcome) = &state {
@@ -271,6 +304,11 @@ async fn caller_loop(
             err = conn.closed() => {
                 let code = close_code_from_conn_err(&err);
                 debug!(?code, "caller saw connection close");
+                // HLX-113: peer closed before accepting a stream — CallRecord
+                // must keep task=None so both ends agree on the audit shape.
+                if code == CloseCode::RateLimited {
+                    record.clear_task();
+                }
                 match caller_step(state, CallerEvent::ConnLost(code)) {
                     Ok(step) => {
                         if let CallerState::Terminal(outcome) = step.state {
