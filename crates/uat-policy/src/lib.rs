@@ -1,4 +1,4 @@
-//! Answering policy (HLX-110 / §6.1 + HLX-111 Biscuit facts).
+//! Answering policy (HLX-110 / §6.1 + HLX-111 Biscuit facts + HLX-112 spent set).
 //!
 //! Default deny. An inbound `Submit` is admitted only via allowlist or a
 //! verifying Biscuit. There is no answer-everyone flag.
@@ -18,11 +18,24 @@
 //! | `max_deadline_ms(n)` | no | `Submit.deadline <= n` when present |
 //! | `content_type(s)` | no | `Submit.content_type == s` when present |
 //! | `one_shot()` | no | token id not in spent set when present |
+//!
+//! # Spent-token set (HLX-112)
+//!
+//! [`MemorySpentSet`] (default on [`Policy`]) is an in-memory map of
+//! `(biscuit_id, expires)`. An entry is inserted when a `one_shot()` token is
+//! accepted and lazily evicted once `expires` has passed (on check/insert).
+//! Every token must carry `expires` (HLX-111); that is the entire memory-safety
+//! argument for this structure.
+//!
+//! **Not persisted — a stated non-goal, not an oversight.** A restarted node
+//! re-admits a spent one-shot until it expires. UAT protects against replay
+//! within a running node only; issuers should keep one-shot expiries short.
+//! Do not add a database here.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use biscuit_auth::builder::{pred, rule, string, Fact, Term};
 use biscuit_auth::builder_ext::AuthorizerExt;
@@ -86,19 +99,30 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Tracks one-shot biscuit ids already consumed (HLX-111 seam; bounded store is HLX-112).
+/// Tracks one-shot biscuit ids already consumed (HLX-112).
+///
+/// Implementations must bound growth by evicting entries whose `expires` has
+/// passed. Persistence is intentionally out of scope — see crate docs.
 pub trait SpentSet: Send + Sync {
-    /// Whether `id` has already been spent.
-    fn contains(&self, id: &[u8; 32]) -> bool;
+    /// Whether `id` is still recorded as spent at `now` (after lazy eviction).
+    fn contains(&self, id: &[u8; 32], now: SystemTime) -> bool;
 
-    /// Mark `id` spent. Returns `false` if it was already present.
-    fn try_spend(&self, id: [u8; 32]) -> bool;
+    /// Record `id` as spent until `expires`.
+    ///
+    /// Returns `false` if `id` was already present and not yet expired.
+    /// Lazy-evicts entries with `expires <= now` before inserting.
+    fn try_spend(&self, id: [u8; 32], expires: SystemTime, now: SystemTime) -> bool;
 }
 
-/// In-memory spent set for tests and M2 stubs.
+/// In-memory `(biscuit_id → expires)` map. Default on [`Policy`]; not persisted.
+///
+/// Bounded because every admitted one-shot token carries `expires` (HLX-111):
+/// lazy eviction on [`SpentSet::contains`] / [`SpentSet::try_spend`] drops
+/// entries once that time has passed, so the set cannot grow without bound
+/// under repeated short-lived tokens.
 #[derive(Debug, Default)]
 pub struct MemorySpentSet {
-    inner: Mutex<HashSet<[u8; 32]>>,
+    inner: Mutex<HashMap<[u8; 32], SystemTime>>,
 }
 
 impl MemorySpentSet {
@@ -107,18 +131,43 @@ impl MemorySpentSet {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Number of live (not-yet-expired) entries after eviction at `now`.
+    #[must_use]
+    pub fn len(&self, now: SystemTime) -> usize {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        evict_expired(&mut guard, now);
+        guard.len()
+    }
+
+    /// Whether the set has no live entries at `now`.
+    #[must_use]
+    pub fn is_empty(&self, now: SystemTime) -> bool {
+        self.len(now) == 0
+    }
+}
+
+fn evict_expired(map: &mut HashMap<[u8; 32], SystemTime>, now: SystemTime) {
+    map.retain(|_, expires| *expires > now);
 }
 
 impl SpentSet for MemorySpentSet {
-    fn contains(&self, id: &[u8; 32]) -> bool {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner()).contains(id)
+    fn contains(&self, id: &[u8; 32], now: SystemTime) -> bool {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        evict_expired(&mut guard, now);
+        guard.contains_key(id)
     }
 
-    fn try_spend(&self, id: [u8; 32]) -> bool {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id)
+    fn try_spend(&self, id: [u8; 32], expires: SystemTime, now: SystemTime) -> bool {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        evict_expired(&mut guard, now);
+        match guard.entry(id) {
+            std::collections::hash_map::Entry::Occupied(_) => false,
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(expires);
+                true
+            }
+        }
     }
 }
 
@@ -331,6 +380,7 @@ fn verify_biscuit_credential(
     }
 
     // Required: expires(ts); missing fails; all must be strictly after now.
+    // Track the earliest expiry for the spent-set entry (HLX-112).
     let expires: Vec<Fact> = authorizer
         .query_all("data($t) <- expires($t)")
         .map_err(|_| AuthError::TokenUnauthorized)?;
@@ -341,6 +391,7 @@ fn verify_biscuit_credential(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let mut earliest_expires: Option<SystemTime> = None;
     for fact in &expires {
         let Term::Date(ts) = single_term(fact)? else {
             return Err(AuthError::TokenUnauthorized);
@@ -348,7 +399,13 @@ fn verify_biscuit_credential(
         if *ts <= now_secs {
             return Err(AuthError::TokenUnauthorized);
         }
+        let exp = UNIX_EPOCH + Duration::from_secs(*ts);
+        earliest_expires = Some(match earliest_expires {
+            Some(prev) if prev <= exp => prev,
+            _ => exp,
+        });
     }
+    let earliest_expires = earliest_expires.ok_or(AuthError::TokenUnauthorized)?;
 
     // Optional: max_deadline_ms(n) → Submit.deadline <= n
     let max_deadlines: Vec<Fact> = authorizer
@@ -378,7 +435,7 @@ fn verify_biscuit_credential(
 
     let biscuit_id = biscuit_id_from_token(&biscuit)?;
 
-    // Optional: one_shot() → id not in spent set (then spend).
+    // Optional: one_shot() → id not in spent set (then spend until earliest expires).
     let empty: &[Term] = &[];
     let oneshot: Vec<Fact> = authorizer
         .query_all(rule(
@@ -388,7 +445,8 @@ fn verify_biscuit_credential(
         ))
         .map_err(|_| AuthError::TokenUnauthorized)?;
     if !oneshot.is_empty()
-        && (policy.spent.contains(&biscuit_id) || !policy.spent.try_spend(biscuit_id))
+        && (policy.spent.contains(&biscuit_id, now)
+            || !policy.spent.try_spend(biscuit_id, earliest_expires, now))
     {
         return Err(AuthError::TokenUnauthorized);
     }
@@ -884,7 +942,7 @@ mod tests {
         let AuthRule::Token { biscuit_id } = first.rule else {
             panic!("expected token rule");
         };
-        assert!(env.spent.contains(&biscuit_id));
+        assert!(env.spent.contains(&biscuit_id, now_secs(1_000_000_000)));
 
         let err = UnverifiedSubmit::from_header(header_submit(Some(cred)))
             .unwrap()
@@ -922,5 +980,78 @@ mod tests {
         .unwrap()
         .verify(&env.policy(), peer(1), now_secs(1_000_000_000))
         .unwrap();
+    }
+
+    #[test]
+    fn spent_set_evicts_when_expires_passes() {
+        let set = MemorySpentSet::new();
+        let id = [0x11; 32];
+        let expires = now_secs(100);
+        assert!(set.try_spend(id, expires, now_secs(50)));
+        assert!(set.contains(&id, now_secs(50)));
+        assert_eq!(set.len(now_secs(50)), 1);
+
+        // expires == now → gone (same bound as token `ts <= now_secs` fail).
+        assert!(!set.contains(&id, now_secs(100)));
+        assert!(set.is_empty(now_secs(100)));
+
+        // Slot reusable after eviction (new spend at a later clock).
+        assert!(set.try_spend(id, now_secs(200), now_secs(150)));
+        assert!(set.contains(&id, now_secs(150)));
+    }
+
+    #[test]
+    fn spent_set_does_not_grow_without_bound_under_repeated_tokens() {
+        let set = MemorySpentSet::new();
+        let mut peak = 0usize;
+        for i in 0..64u64 {
+            let mut id = [0u8; 32];
+            id[..8].copy_from_slice(&i.to_le_bytes());
+            // Controlled expires: each entry lives only until the next tick.
+            let now = now_secs(i);
+            let expires = now_secs(i + 1);
+            assert!(set.try_spend(id, expires, now));
+            let live = set.len(now);
+            peak = peak.max(live);
+            // After eviction of anything with expires <= now, only the fresh
+            // entry (expires = now+1) can remain.
+            assert!(live <= 1, "live={live} at i={i}");
+        }
+        assert_eq!(peak, 1);
+        // Advance past the last expiry → empty.
+        assert!(set.is_empty(now_secs(64)));
+    }
+
+    #[test]
+    fn one_shot_spent_entry_uses_token_expires() {
+        let env = TokenEnv::new();
+        let exp = now_secs(1_000_000_100);
+        let empty: &[Term] = &[];
+        let mut facts = env.required_facts(exp);
+        facts.push(fact("one_shot", empty));
+        let cred = env.mint(&facts);
+        let policy = env.policy();
+        let t0 = now_secs(1_000_000_000);
+
+        UnverifiedSubmit::from_header(header_submit(Some(cred)))
+            .unwrap()
+            .verify(&policy, peer(1), t0)
+            .unwrap();
+        assert_eq!(env.spent.len(t0), 1);
+        // Same wall as token expires → entry evicted; set empty again.
+        assert!(env.spent.is_empty(exp));
+    }
+
+    #[test]
+    fn policy_defaults_to_memory_spent_set() {
+        let policy = Policy::empty();
+        // Default wiring is MemorySpentSet (downcast via try_spend behaviour).
+        let id = [0x42; 32];
+        assert!(!policy.spent_set().contains(&id, now_secs(1)));
+        assert!(policy
+            .spent_set()
+            .try_spend(id, now_secs(10), now_secs(1)));
+        assert!(policy.spent_set().contains(&id, now_secs(1)));
+        assert!(!policy.spent_set().contains(&id, now_secs(10)));
     }
 }
